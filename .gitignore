@@ -2,3 +2,4 @@
 .codex
 *.txt
 openspec
+/target

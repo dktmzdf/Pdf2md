@@ -1,0 +1,7 @@
+interface:
+  display_name: "pdf2md"
+  short_description: "Convert a PDF to Markdown locally (Korean OCR) and read it"
+
+# Run only when the user explicitly invokes $pdf2md.
+policy:
+  allow_implicit_invocation: false
