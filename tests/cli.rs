@@ -325,3 +325,68 @@ fn write_failure_has_its_own_exit_code() {
     assert_eq!(o.status.code(), Some(6));
     assert!(String::from_utf8_lossy(&o.stderr).contains("cannot write"));
 }
+
+/// Text drawn as vector outlines: no text layer, no fonts, no images. Made with
+/// `gs -dNoOutputFonts -sDEVICE=pdfwrite` from a Helvetica text PDF
+/// ("VECTOR OUTLINE TEXT" / "SCAN 2026 PAGE").
+const VECTOR_TEXT: &[u8] = include_bytes!("fixtures/vector_text.pdf");
+
+#[test]
+fn scan_with_crop_box_is_read() {
+    let d = workdir("cropbox");
+    let plain = write_pdf(&d, &[Page::Scan(KO_SCAN)]);
+    let cropped = d.join("cropped.pdf");
+    let mut pdf = Pdf::open(&plain).unwrap();
+    // Smaller than the media box and not at the origin; the scan text (x ~30..500pt,
+    // y 400..600) stays fully visible.
+    pdf.set_page_crop_box(0, [20.0, 300.0, 575.0, 700.0]).unwrap();
+    pdf.save(&cropped).unwrap();
+    let (out, _) = run_ok(&[s(&cropped), "--models", s(&models())]);
+    let md = std::fs::read_to_string(d.join("cropped.md")).unwrap();
+    assert!(md.contains("객체지향") && md.contains("책임"), "{out}\n{md}");
+}
+
+#[test]
+fn scan_split_into_small_tiles_is_read() {
+    // 1200x300 px scan cut into 48 tiles of 100x75 px; each tile is ~0.37% of the page.
+    let scan = image::load_from_memory(KO_SCAN).unwrap();
+    let (cols, rows) = (12u32, 4u32);
+    let (tw, th) = (scan.width() / cols, scan.height() / rows);
+    let (x0, top, w_pt) = (0.0f32, 600.0f32, 595.0f32);
+    let scale = w_pt / scan.width() as f32;
+    let mut b = DocumentBuilder::new();
+    let mut page = b.page(PageSize::A4);
+    for r in 0..rows {
+        for c in 0..cols {
+            let mut png = std::io::Cursor::new(Vec::new());
+            scan.crop_imm(c * tw, r * th, tw, th).write_to(&mut png, image::ImageFormat::Png).unwrap();
+            let rect = Rect::new(
+                x0 + (c * tw) as f32 * scale,
+                top - ((r + 1) * th) as f32 * scale,
+                tw as f32 * scale,
+                th as f32 * scale,
+            );
+            page = page.image_from_bytes(png.get_ref(), rect).unwrap();
+        }
+    }
+    page.done();
+    let d = workdir("tiles");
+    let pdf = d.join("doc.pdf");
+    std::fs::write(&pdf, b.build().unwrap()).unwrap();
+    let (out, _) = run_ok(&[s(&pdf), "--models", s(&models())]);
+    let md = std::fs::read_to_string(d.join("doc.md")).unwrap();
+    assert!(md.contains("객체지향") && md.contains("책임"), "{out}\n{md}");
+    assert!(out.contains("- p.1 confidence"), "{out}");
+    assert!(md.matches("[image p.1]").count() < 48, "{md}");
+}
+
+#[test]
+fn vector_outline_text_is_ocrd() {
+    let d = workdir("vector");
+    let pdf = d.join("doc.pdf");
+    std::fs::write(&pdf, VECTOR_TEXT).unwrap();
+    let (out, _) = run_ok(&[s(&pdf), "--models", s(&models())]);
+    let md = std::fs::read_to_string(d.join("doc.md")).unwrap();
+    assert!(md.contains("VECTOR") && md.contains("2026"), "{out}\n{md}");
+    assert!(out.contains("- p.1 confidence"), "{out}");
+}
