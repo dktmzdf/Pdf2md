@@ -14,25 +14,32 @@ fn main() -> ExitCode {
                 Error::Unreadable(_) => 3,
                 Error::MissingModels { .. } => 4,
                 Error::Ocr(_) => 5,
+                Error::Write(_) => 6,
             })
         },
     }
 }
 
 fn run() -> Result<(), Error> {
-    let mut args = std::env::args().skip(1);
+    // OsString, not String: file names need not be valid UTF-8 (Linux allows any bytes).
+    let mut args = std::env::args_os().skip(1);
     let (mut input, mut range, mut models) = (None, None, None);
     while let Some(a) = args.next() {
-        let mut value = || args.next().ok_or_else(|| Error::Usage(format!("{a} needs a value\n{USAGE}")));
-        match a.as_str() {
-            "--pages" => range = Some(parse_range(&value()?)?),
-            "--models" => models = Some(PathBuf::from(value()?)),
-            "-h" | "--help" => {
+        let shown = a.to_string_lossy().into_owned();
+        let mut value = || args.next().ok_or_else(|| Error::Usage(format!("{shown} needs a value\n{USAGE}")));
+        match a.to_str() {
+            Some("--pages") => {
+                let v = value()?;
+                let v = v.to_str().ok_or_else(|| Error::Usage(format!("invalid page range {v:?}")))?;
+                range = Some(parse_range(v)?);
+            },
+            Some("--models") => models = Some(PathBuf::from(value()?)),
+            Some("-h" | "--help") => {
                 println!("{USAGE}");
                 return Ok(());
             },
-            _ if input.is_none() && !a.starts_with("--") => input = Some(PathBuf::from(a)),
-            _ => return Err(Error::Usage(format!("unexpected argument '{a}'\n{USAGE}"))),
+            _ if input.is_none() && !shown.starts_with("--") => input = Some(PathBuf::from(a)),
+            _ => return Err(Error::Usage(format!("unexpected argument '{shown}'\n{USAGE}"))),
         }
     }
     let input = input.ok_or_else(|| Error::Usage(USAGE.to_string()))?;
@@ -44,7 +51,7 @@ fn run() -> Result<(), Error> {
     let conv = convert(&input, range, &models)?;
     // Written only after a successful conversion, so failures never leave a partial file.
     std::fs::write(&out, &conv.markdown)
-        .map_err(|e| Error::Unreadable(format!("cannot write {}: {e}", out.display())))?;
+        .map_err(|e| Error::Write(format!("cannot write {}: {e}", out.display())))?;
     println!("wrote {}", out.display());
     print!("{}", report(&conv.ocr_pages, LOW_CONFIDENCE));
     Ok(())

@@ -9,12 +9,23 @@ use std::process::{Command, Output};
 
 const KO_SCAN: &[u8] = include_bytes!("fixtures/ko_scan.png");
 const KO_TABLE_SCAN: &[u8] = include_bytes!("fixtures/ko_table_scan.png");
+const SCAN_TOP: &[u8] = include_bytes!("fixtures/scan_top.png");
+const SCAN_BOTTOM: &[u8] = include_bytes!("fixtures/scan_bottom.png");
+const SCAN_BODY: &[u8] = include_bytes!("fixtures/scan_body.png");
+const FIG_A: &[u8] = include_bytes!("fixtures/fig_a.png");
+const FIG_B: &[u8] = include_bytes!("fixtures/fig_b.png");
 
 enum Page<'a> {
     Text(&'a str),
     Table,
     TextAndFigure(&'a str),
     Scan(&'a [u8]),
+    /// One scanned page stored as two stacked image strips.
+    SplitScan,
+    /// A large scan with a header and a page number in the text layer outside the image.
+    ScanWithHeader,
+    /// A text line plus two equally sized, different figures, placed at `size` points wide.
+    TwoFigures(f32),
 }
 
 fn build(pages: &[Page]) -> Vec<u8> {
@@ -32,6 +43,30 @@ fn build(pages: &[Page]) -> Vec<u8> {
                 p.at(72.0, 760.0).text(t).image_from_bytes(KO_SCAN, Rect::new(72.0, 300.0, 120.0, 30.0)).unwrap().done()
             },
             Page::Scan(png) => p.image_from_bytes(png, Rect::new(0.0, 400.0, 595.0, 200.0)).unwrap().done(),
+            Page::SplitScan => p
+                .image_from_bytes(SCAN_TOP, Rect::new(0.0, 571.0, 595.0, 149.0))
+                .unwrap()
+                .image_from_bytes(SCAN_BOTTOM, Rect::new(0.0, 422.0, 595.0, 149.0))
+                .unwrap()
+                .done(),
+            Page::ScanWithHeader => p
+                .at(72.0, 800.0)
+                .text("ACME REPORT")
+                .image_from_bytes(SCAN_BODY, Rect::new(20.0, 120.0, 555.0, 640.0))
+                .unwrap()
+                .at(280.0, 60.0)
+                .text("Page 12")
+                .done(),
+            Page::TwoFigures(w) => {
+                let h = w * 0.3;
+                p.at(72.0, 780.0)
+                    .text("Two figures follow.")
+                    .image_from_bytes(FIG_A, Rect::new(72.0, 700.0 - h, *w, h))
+                    .unwrap()
+                    .image_from_bytes(FIG_B, Rect::new(72.0, 650.0 - 2.0 * h, *w, h))
+                    .unwrap()
+                    .done()
+            },
         };
     }
     b.build().unwrap()
@@ -221,4 +256,72 @@ fn converts_scan_with_network_disabled() {
         .expect("unshare (util-linux) is required for this test");
     assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
     assert!(std::fs::read_to_string(d.join("doc.md")).unwrap().contains("객체지향"));
+}
+
+#[test]
+fn scan_split_into_two_images_is_read_completely() {
+    let d = workdir("splitscan");
+    let pdf = write_pdf(&d, &[Page::SplitScan]);
+    let (out, _) = run_ok(&[s(&pdf), "--models", s(&models())]);
+    let md = std::fs::read_to_string(d.join("doc.md")).unwrap();
+    assert!(md.contains("위쪽 조각의 첫 번째") && md.contains("아래쪽 조각의 두 번째"), "{md}");
+    assert!(!md.contains("[image p.1]"), "scan strips are not figures: {md}");
+    assert!(out.contains("- p.1 confidence") && !out.contains("partial"), "{out}");
+}
+
+#[test]
+fn scan_keeps_text_layer_header_and_page_number() {
+    let d = workdir("headerscan");
+    let pdf = write_pdf(&d, &[Page::ScanWithHeader]);
+    run_ok(&[s(&pdf), "--models", s(&models())]);
+    let md = std::fs::read_to_string(d.join("doc.md")).unwrap();
+    for want in ["ACME REPORT", "Page 12", "스캔 본문은 이미지 안에"] {
+        assert!(md.contains(want), "missing {want}: {md}");
+    }
+}
+
+#[test]
+fn hybrid_page_ocrs_every_image_region() {
+    let d = workdir("hybrid");
+    let pdf = write_pdf(&d, &[Page::TwoFigures(400.0)]);
+    let (out, _) = run_ok(&[s(&pdf), "--models", s(&models())]);
+    let md = std::fs::read_to_string(d.join("doc.md")).unwrap();
+    assert!(out.contains("OCR pages: 1"), "page should be OCR'd as hybrid: {out}\n{md}");
+    for want in ["Two figures follow.", "첫째 그림", "둘째 그림"] {
+        assert!(md.contains(want), "missing {want}: {md}");
+    }
+}
+
+#[test]
+fn same_size_figures_get_one_placeholder_each() {
+    let d = workdir("twofigs");
+    let pdf = write_pdf(&d, &[Page::TwoFigures(200.0)]);
+    run_ok(&[s(&pdf), "--models", s(&models())]);
+    let md = std::fs::read_to_string(d.join("doc.md")).unwrap();
+    assert_eq!(md.matches("[image p.1]").count(), 2, "{md}");
+}
+
+#[cfg(unix)]
+#[test]
+fn accepts_non_utf8_file_names() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let d = workdir("nonutf8");
+    let name = OsStr::from_bytes(b"r\xffport.pdf");
+    let pdf = d.join(name);
+    std::fs::write(&pdf, build(&[Page::Text("bytes in the name")])).unwrap();
+    let o = Command::new(env!("CARGO_BIN_EXE_pdf2md")).arg(&pdf).output().unwrap();
+    assert!(o.status.success(), "exit {:?}: {}", o.status.code(), String::from_utf8_lossy(&o.stderr));
+    let md = std::fs::read_to_string(d.join(OsStr::from_bytes(b"r\xffport.md"))).unwrap();
+    assert!(md.contains("bytes in the name"));
+}
+
+#[test]
+fn write_failure_has_its_own_exit_code() {
+    let d = workdir("writefail");
+    let pdf = write_pdf(&d, &[Page::Text("fine pdf")]);
+    std::fs::create_dir(d.join("doc.md")).unwrap();
+    let o = run(&[s(&pdf)]);
+    assert_eq!(o.status.code(), Some(6));
+    assert!(String::from_utf8_lossy(&o.stderr).contains("cannot write"));
 }
