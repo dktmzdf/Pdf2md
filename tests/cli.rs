@@ -1,5 +1,5 @@
-//! End-to-end tests of the `pdf2md` binary. Fixture PDFs are built at test time with
-//! pdf_oxide's writer. OCR tests need the model files: set `PDF2MD_MODEL_DIR` (see README).
+//! `pdf2md` 바이너리를 실제로 실행하는 통합 테스트. fixture PDF는 대부분 테스트 중에 pdf_oxide writer로 만든다.
+//! OCR이 필요한 테스트는 모델 파일이 있어야 한다. `PDF2MD_MODEL_DIR`을 지정한다(README 참고).
 
 use pdf_oxide::api::Pdf;
 use pdf_oxide::geometry::Rect;
@@ -20,11 +20,11 @@ enum Page<'a> {
     Table,
     TextAndFigure(&'a str),
     Scan(&'a [u8]),
-    /// One scanned page stored as two stacked image strips.
+    /// 위아래 두 장의 이미지 띠로 저장된 스캔 페이지 하나.
     SplitScan,
-    /// A large scan with a header and a page number in the text layer outside the image.
+    /// 큰 스캔 이미지와, 이미지 밖 text layer에 있는 머리글과 쪽 번호.
     ScanWithHeader,
-    /// A text line plus two equally sized, different figures, placed at `size` points wide.
+    /// 본문 한 줄과, 픽셀 크기는 같지만 내용이 다른 그림 두 개. 그림 폭은 `size` pt.
     TwoFigures(f32),
 }
 
@@ -72,7 +72,7 @@ fn build(pages: &[Page]) -> Vec<u8> {
     b.build().unwrap()
 }
 
-/// A fresh directory per test so parallel tests never share files.
+/// 테스트마다 새 디렉터리를 쓴다. 병렬로 도는 테스트끼리 파일이 섞이지 않게 하려는 것이다.
 fn workdir(name: &str) -> PathBuf {
     let d = std::env::temp_dir().join(format!("pdf2md-test-{}-{name}", std::process::id()));
     let _ = std::fs::remove_dir_all(&d);
@@ -243,8 +243,8 @@ fn missing_models_fail_only_when_ocr_needed() {
     assert!(!d.join("doc.md").exists());
 }
 
-/// Runs inside a fresh network namespace (no interfaces but loopback down), so any
-/// network attempt would fail the conversion.
+/// 새 네트워크 namespace 안에서 실행한다(loopback조차 내려가 있음).
+/// 네트워크에 접근하려는 시도가 있으면 변환이 실패한다.
 #[cfg(target_os = "linux")]
 #[test]
 fn converts_scan_with_network_disabled() {
@@ -326,9 +326,9 @@ fn write_failure_has_its_own_exit_code() {
     assert!(String::from_utf8_lossy(&o.stderr).contains("cannot write"));
 }
 
-/// Text drawn as vector outlines: no text layer, no fonts, no images. Made with
-/// `gs -dNoOutputFonts -sDEVICE=pdfwrite` from a Helvetica text PDF
-/// ("VECTOR OUTLINE TEXT" / "SCAN 2026 PAGE").
+/// 글자를 벡터 윤곽선으로 그린 페이지: text layer, 폰트, 이미지가 모두 없다.
+/// Helvetica 텍스트 PDF("VECTOR OUTLINE TEXT" / "SCAN 2026 PAGE")를
+/// `gs -dNoOutputFonts -sDEVICE=pdfwrite`로 변환해서 만들었다.
 const VECTOR_TEXT: &[u8] = include_bytes!("fixtures/vector_text.pdf");
 
 #[test]
@@ -337,8 +337,7 @@ fn scan_with_crop_box_is_read() {
     let plain = write_pdf(&d, &[Page::Scan(KO_SCAN)]);
     let cropped = d.join("cropped.pdf");
     let mut pdf = Pdf::open(&plain).unwrap();
-    // Smaller than the media box and not at the origin; the scan text (x ~30..500pt,
-    // y 400..600) stays fully visible.
+    // MediaBox보다 작고 원점도 다르다. 스캔 글자(x 약 30..500pt, y 400..600)는 전부 보인다.
     pdf.set_page_crop_box(0, [20.0, 300.0, 575.0, 700.0]).unwrap();
     pdf.save(&cropped).unwrap();
     let (out, _) = run_ok(&[s(&cropped), "--models", s(&models())]);
@@ -348,7 +347,7 @@ fn scan_with_crop_box_is_read() {
 
 #[test]
 fn scan_split_into_small_tiles_is_read() {
-    // 1200x300 px scan cut into 48 tiles of 100x75 px; each tile is ~0.37% of the page.
+    // 1200x300 px 스캔을 100x75 px 타일 48개로 자른다. 타일 하나는 페이지 면적의 약 0.37%다.
     let scan = image::load_from_memory(KO_SCAN).unwrap();
     let (cols, rows) = (12u32, 4u32);
     let (tw, th) = (scan.width() / cols, scan.height() / rows);

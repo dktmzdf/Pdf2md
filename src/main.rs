@@ -4,6 +4,7 @@ use std::process::ExitCode;
 
 const USAGE: &str = "usage: pdf2md <input.pdf> [--pages N|A-B] [--models DIR]";
 
+/// 오류 종류를 종료 코드로 바꾼다. README와 SKILL.md의 종료 코드 표와 같아야 한다.
 fn main() -> ExitCode {
     match run() {
         Ok(()) => ExitCode::SUCCESS,
@@ -21,7 +22,7 @@ fn main() -> ExitCode {
 }
 
 fn run() -> Result<(), Error> {
-    // OsString, not String: file names need not be valid UTF-8 (Linux allows any bytes).
+    // String이 아니라 OsString으로 받는다. 파일 이름이 UTF-8이 아닐 수 있다(Linux는 아무 바이트나 허용).
     let mut args = std::env::args_os().skip(1);
     let (mut input, mut range, mut models) = (None, None, None);
     while let Some(a) = args.next() {
@@ -49,7 +50,7 @@ fn run() -> Result<(), Error> {
 
     let out = input.with_extension("md");
     let conv = convert(&input, range, &models)?;
-    // Written only after a successful conversion, so failures never leave a partial file.
+    // 변환이 성공한 뒤에만 쓴다. 변환 중 실패하면 출력 파일이 생기지 않는다.
     std::fs::write(&out, &conv.markdown)
         .map_err(|e| Error::Write(format!("cannot write {}: {e}", out.display())))?;
     println!("wrote {}", out.display());
@@ -57,7 +58,8 @@ fn run() -> Result<(), Error> {
     Ok(())
 }
 
-/// `models/` next to the executable, so a skill folder can ship binary + models together.
+/// 실행 파일 옆의 `models/`. skill 폴더에 바이너리와 모델을 같이 넣어 배포하기 위해서다.
+/// 심볼릭 링크로 실행하면 `current_exe()`가 원본 경로로 풀리니, skill에는 복사본을 둬야 한다.
 fn default_model_dir() -> PathBuf {
     std::env::current_exe()
         .ok()

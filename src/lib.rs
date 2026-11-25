@@ -1,4 +1,4 @@
-//! PDF -> Markdown conversion with offline Korean OCR (pdf_oxide + tract).
+//! PDF를 Markdown으로 변환한다. 스캔 페이지는 오프라인 한국어 OCR(pdf_oxide + tract)로 읽는다.
 
 use image::{DynamicImage, RgbaImage};
 use pdf_oxide::PdfDocument;
@@ -10,23 +10,23 @@ use pdf_oxide::rendering::{RenderOptions, render_page};
 use std::fmt;
 use std::path::{Path, PathBuf};
 
-/// OCR pages whose mean confidence is below this are flagged as low (design D6).
+/// OCR 평균 신뢰도가 이 값보다 낮은 페이지는 보고에 `(low)`로 표시한다(add-pdf2md-skill design D6).
 pub const LOW_CONFIDENCE: f32 = 0.90;
-/// Files expected in the model directory (design D8).
+/// 모델 디렉터리에 있어야 하는 파일(add-pdf2md-skill design D8).
 pub const MODEL_FILES: [&str; 3] = ["det.onnx", "rec.onnx", "dict.txt"];
-/// Render resolution for cropping image regions to OCR (fix-review-findings D1).
+/// OCR할 이미지 영역을 잘라낼 때 쓰는 렌더링 해상도(fix-review-findings design D1).
 const RENDER_DPI: u32 = 200;
-/// Images smaller than this share of the page (logos, icons) are not OCR'd.
+/// 합친 이미지 영역이 페이지 면적의 이 비율보다 작으면(로고, 아이콘) OCR하지 않는다.
 const MIN_IMAGE_AREA: f32 = 0.005;
 
 pub struct OcrPage {
     pub page: usize,
     pub confidence: f32,
-    /// Only part of the page's image content could be OCR'd (render failed).
+    /// 렌더링 실패 등으로 페이지 이미지 내용 일부만 OCR했다.
     pub partial: bool,
 }
 
-/// Pixel rectangle on the rendered page: (x0, y0, x1, y1), top-left origin.
+/// 사각형 `(x0, y0, x1, y1)`. 렌더링 결과의 픽셀 좌표(왼쪽 위 원점)나 PDF 좌표(왼쪽 아래 원점)에 쓴다.
 type Px = (f32, f32, f32, f32);
 
 pub struct Conversion {
@@ -36,14 +36,15 @@ pub struct Conversion {
 
 #[derive(Debug)]
 pub enum Error {
-    /// Bad CLI input such as an invalid or out-of-range page range.
+    /// 잘못된 CLI 입력. 예: 형식이 틀리거나 문서 범위를 넘는 페이지 범위.
     Usage(String),
-    /// The PDF cannot be opened or read (corrupt, password protected).
+    /// 입력 PDF를 열거나 읽을 수 없다(손상, 열람 암호).
     Unreadable(String),
-    /// OCR is needed but model files are missing.
+    /// OCR이 필요한데 모델 파일이 없다.
     MissingModels { dir: PathBuf, missing: Vec<&'static str> },
+    /// OCR 모델 로드나 실행에 실패했다.
     Ocr(String),
-    /// The PDF was converted but the output file could not be written.
+    /// 변환은 했지만 출력 `.md` 파일을 쓸 수 없다.
     Write(String),
 }
 
@@ -62,7 +63,7 @@ impl fmt::Display for Error {
     }
 }
 
-/// Parses `N` or `A-B` (1-based, inclusive).
+/// `N` 또는 `A-B` 형식의 페이지 범위를 읽는다(1부터 세고, 끝 포함).
 pub fn parse_range(s: &str) -> Result<(usize, usize), Error> {
     let bad = || Error::Usage(format!("invalid page range '{s}' (expected N or A-B)"));
     let (a, b) = s.split_once('-').unwrap_or((s, s));
@@ -73,10 +74,11 @@ pub fn parse_range(s: &str) -> Result<(usize, usize), Error> {
     Ok((a, b))
 }
 
+/// PDF의 지정 범위(없으면 전체)를 Markdown으로 바꾼다. OCR이 필요한 페이지가 있을 때만 모델을 읽는다.
 pub fn convert(pdf: &Path, range: Option<(usize, usize)>, model_dir: &Path) -> Result<Conversion, Error> {
     let unreadable = |e: &dyn fmt::Display| Error::Unreadable(format!("cannot read {}: {e}", pdf.display()));
     let doc = PdfDocument::open(pdf).map_err(|e| unreadable(&e))?;
-    // An encrypted PDF with an empty user password is readable; only a real open password blocks us.
+    // 사용자 암호가 빈 문자열인 암호화 PDF는 읽을 수 있다. 실제 열람 암호가 있을 때만 거부한다.
     if doc.is_encrypted() && !doc.authenticate(b"").unwrap_or(false) {
         return Err(Error::Unreadable(format!("{} is password protected", pdf.display())));
     }
@@ -97,7 +99,7 @@ pub fn convert(pdf: &Path, range: Option<(usize, usize)>, model_dir: &Path) -> R
     let mut ocr_pages = Vec::new();
     for (p, kind) in pages {
         markdown.push_str(&format!("<!-- p.{} -->\n\n", p + 1));
-        // Text-layer content (headers, page numbers, body) always comes from the text layer.
+        // 머리글, 쪽 번호, 본문 같은 디지털 글자는 항상 text layer에서 가져온다. OCR하지 않는다.
         let mut body = doc.to_markdown(p, &opts).map_err(|e| unreadable(&e))?.trim_end().to_string();
         let images = doc.extract_images(p).unwrap_or_default();
         let mut figures = images.len();
@@ -108,7 +110,7 @@ pub fn convert(pdf: &Path, range: Option<(usize, usize)>, model_dir: &Path) -> R
                 if !o.text.is_empty() {
                     body = [body, o.text].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n\n");
                 }
-                // On a scanned page the OCR'd images are the scan itself, not figures (design D4).
+                // 스캔 페이지에서 OCR한 이미지는 스캔 자체라 그림이 아니다. placeholder에서 뺀다(fix-review-findings design D4).
                 if kind == PageType::ScannedPage {
                     figures -= o.images;
                 }
@@ -127,15 +129,16 @@ struct PageOcr {
     text: String,
     confidence: f32,
     partial: bool,
-    /// Number of embedded images whose content went into `text`.
+    /// `text`에 내용이 들어간 embedded image 수.
     images: usize,
 }
 
-/// OCRs what page `p` shows (design D1 of fix-review-findings and fix-scan-ocr-coverage):
-/// merge the image regions, drop merged regions under `MIN_IMAGE_AREA`, render the page once
-/// and OCR the kept regions top to bottom. A page with no such region but also no text layer
-/// (glyphs drawn as vector outlines) is OCR'd whole. Falls back to the largest embedded image
-/// (marked partial) when rendering or placement fails. `None` when nothing to OCR.
+/// 페이지 `p`에 보이는 이미지 내용을 OCR한다(fix-review-findings, fix-scan-ocr-coverage design D1~D3).
+/// 1. 이미지 영역을 먼저 합치고, `MIN_IMAGE_AREA`보다 작은 영역은 버린다.
+/// 2. 페이지를 한 번 렌더링해서 남은 영역을 위에서 아래 순서로 잘라 OCR한다.
+/// 3. 남은 영역이 없는데 text layer도 없으면(벡터 도형 글자) 페이지 전체를 OCR한다.
+/// 렌더링이나 이미지 위치 파악에 실패하면 가장 큰 이미지만 OCR하고 partial로 표시한다.
+/// OCR할 것이 없으면 `None`.
 fn ocr_images(
     doc: &PdfDocument,
     p: usize,
@@ -152,12 +155,12 @@ fn ocr_images(
         Ok(Some(PageOcr { text: out.text_in_reading_order(), confidence: out.total_confidence, partial: true, images: 1 }))
     };
     if images.iter().any(|i| i.bbox().is_none()) {
-        return largest(images); // an image we cannot place on the page: cannot crop regions
+        return largest(images); // 위치(bbox)를 모르는 이미지가 있으면 영역을 잘라낼 수 없다
     }
     let info = doc.get_page_info(p).map_err(|e| ocr_err(&e))?;
     let bx = render_box(&info);
     let box_area = (bx.2 - bx.0) * (bx.3 - bx.1);
-    // Merge first so a scan cut into many small tiles still forms one large region.
+    // 먼저 합쳐야 작은 타일 여러 개로 나뉜 스캔도 하나의 큰 영역이 되어 면적 기준을 통과한다.
     let regions: Vec<(Px, usize)> = images
         .iter()
         .map(|i| {
@@ -181,7 +184,7 @@ fn ocr_images(
 
     let dims = page.dimensions();
     let mut crops: Vec<(Px, usize)> = if kept.is_empty() {
-        // Nothing but vector drawing on a page without a text layer: OCR the whole page.
+        // text layer 없이 벡터 도형만 있는 페이지(도형으로 그린 글자): 페이지 전체를 OCR한다.
         vec![((0.0, 0.0, dims.0 as f32, dims.1 as f32), 0)]
     } else {
         kept.iter()
@@ -213,9 +216,9 @@ fn ocr_images(
     Ok(Some(PageOcr { text: texts.join("\n\n"), confidence, partial: false, images: used }))
 }
 
-/// The page area the renderer draws: MediaBox ∩ CropBox, or the MediaBox when they do not
-/// overlap. Mirrors pdf_oxide 0.3.78 `rendering::page_render_box` (crate-private); recheck it
-/// when upgrading pdf_oxide. Returns `(x0, y0, x1, y1)` in PDF user space.
+/// 렌더러가 그리는 페이지 영역: MediaBox ∩ CropBox, 둘이 겹치지 않으면 MediaBox.
+/// pdf_oxide 0.3.78의 `rendering::page_render_box`(crate 내부 전용)를 그대로 옮긴 것이라,
+/// pdf_oxide를 올릴 때 같은지 다시 확인해야 한다. PDF 좌표의 `(x0, y0, x1, y1)`을 돌려준다.
 fn render_box(info: &PageInfo) -> Px {
     let m = &info.media_box;
     let media = (m.x, m.y, m.x + m.width, m.y + m.height);
@@ -224,10 +227,9 @@ fn render_box(info: &PageInfo) -> Px {
     if b.2 <= b.0 || b.3 <= b.1 { media } else { b }
 }
 
-/// Maps a PDF user-space rect `(x, y, w, h)` (bottom-left origin) onto the rendered page
-/// raster (top-left origin). `page` is the rendered area `(x0, y0, x1, y1)` from `render_box`.
-/// The renderer applies `/Rotate` clockwise, so do the same here; the scale comes from the
-/// raster itself because the renderer may lower the DPI.
+/// PDF 좌표의 사각형 `(x, y, w, h)`(왼쪽 아래 원점)를 렌더링 결과의 픽셀 좌표(왼쪽 위 원점)로 바꾼다.
+/// `page`는 `render_box`가 돌려준 렌더링 영역이다. 렌더러가 `/Rotate`를 시계 방향으로 적용하므로
+/// 여기서도 똑같이 돌린다. 렌더러가 메모리 한도 때문에 DPI를 낮출 수 있어서, 배율은 렌더링 결과 크기에서 계산한다.
 fn to_raster(r: (f32, f32, f32, f32), page: Px, rot: i32, raster: (u32, u32)) -> Px {
     let rot = rot.rem_euclid(360);
     let (w0, h0) = if rot % 180 == 0 { raster } else { (raster.1, raster.0) };
@@ -246,8 +248,8 @@ fn to_raster(r: (f32, f32, f32, f32), page: Px, rot: i32, raster: (u32, u32)) ->
     (a.0.min(b.0), a.1.min(b.1), a.0.max(b.0), a.1.max(b.1))
 }
 
-/// Merges overlapping or touching regions (a scan split into strips or tiles becomes one
-/// region), adding up how many images each merged region holds.
+/// 겹치거나 맞닿은 영역을 하나로 합친다(띠나 타일로 나뉜 스캔이 한 영역이 됨).
+/// 합친 영역마다 들어간 이미지 수를 더해 둔다.
 fn merge_regions(regions: Vec<(Px, usize)>) -> Vec<(Px, usize)> {
     const SLACK: f32 = 1.0;
     let mut merged: Vec<(Px, usize)> = Vec::new();
@@ -265,17 +267,18 @@ fn merge_regions(regions: Vec<(Px, usize)>) -> Vec<(Px, usize)> {
     merged
 }
 
+/// 모델 디렉터리에서 OCR 엔진을 만든다. 파일이 없으면 다운로드하지 않고 `MissingModels`로 실패한다.
 fn load_engine(dir: &Path) -> Result<OcrEngine, Error> {
     let missing: Vec<_> = MODEL_FILES.into_iter().filter(|f| !dir.join(f).is_file()).collect();
     if !missing.is_empty() {
         return Err(Error::MissingModels { dir: dir.to_path_buf(), missing });
     }
-    // Defaults match the chosen models: MaxSide 960 det, rec height 48 (design D8).
+    // 기본 설정이 고른 모델에 맞다: detection은 긴 변 960, recognition 입력 높이 48(add-pdf2md-skill design D8).
     OcrEngine::new(dir.join("det.onnx"), dir.join("rec.onnx"), dir.join("dict.txt"), OcrConfig::default())
         .map_err(|e| Error::Ocr(format!("cannot load OCR models from {}: {e}", dir.display())))
 }
 
-/// Human-readable OCR page report for stdout (spec: OCR 페이지 보고).
+/// 표준 출력용 OCR 페이지 보고문(spec: OCR 페이지 보고). 사람이 바로 읽는 텍스트다.
 pub fn report(ocr_pages: &[OcrPage], low: f32) -> String {
     if ocr_pages.is_empty() {
         return "OCR pages: none\n".to_string();
@@ -318,11 +321,11 @@ mod tests {
 
     #[test]
     fn raster_mapping_follows_page_rotation() {
-        // Letter-ish page 100x200pt rendered at 2 px/pt; rect at bottom-left corner, 10x20pt.
+        // 100x200pt 페이지를 2 px/pt로 렌더링. 왼쪽 아래 모서리의 10x20pt 사각형.
         let media = (0.0, 0.0, 100.0, 200.0);
         let rect = (0.0, 0.0, 10.0, 20.0);
         assert_eq!(to_raster(rect, media, 0, (200, 400)), (0.0, 360.0, 20.0, 400.0));
-        // 90 clockwise: the page's bottom-left goes to the raster's top-left.
+        // 시계 방향 90도: 페이지의 왼쪽 아래가 렌더링 결과의 왼쪽 위로 간다.
         assert_eq!(to_raster(rect, media, 90, (400, 200)), (0.0, 0.0, 40.0, 20.0));
         assert_eq!(to_raster(rect, media, 180, (200, 400)), (180.0, 0.0, 200.0, 40.0));
         assert_eq!(to_raster(rect, media, 270, (400, 200)), (360.0, 180.0, 400.0, 200.0));
@@ -331,8 +334,8 @@ mod tests {
 
     #[test]
     fn raster_mapping_uses_the_rendered_box_origin() {
-        // CropBox (50,300)-(545,700) rendered at 1 px/pt: a rect at (60,500) 100x50 sits at
-        // x = 60-50 = 10 and y = 700-550 = 150 from the top-left of the raster.
+        // CropBox (50,300)-(545,700)을 1 px/pt로 렌더링. (60,500)의 100x50 사각형은
+        // 렌더링 결과 왼쪽 위에서 x = 60-50 = 10, y = 700-550 = 150에 있다.
         assert_eq!(to_raster((60.0, 500.0, 100.0, 50.0), (50.0, 300.0, 545.0, 700.0), 0, (495, 400)), (10.0, 150.0, 110.0, 200.0));
     }
 
@@ -343,7 +346,7 @@ mod tests {
         let info = |crop| PageInfo { media_box: media, crop_box: crop, rotation: 0 };
         assert_eq!(render_box(&info(None)), (0.0, 0.0, 595.0, 842.0));
         assert_eq!(render_box(&info(Some(Rect::new(50.0, 300.0, 495.0, 400.0)))), (50.0, 300.0, 545.0, 700.0));
-        // No overlap: fall back to the media box, like the renderer.
+        // 겹치지 않으면 렌더러처럼 MediaBox를 쓴다.
         assert_eq!(render_box(&info(Some(Rect::new(700.0, 900.0, 10.0, 10.0)))), (0.0, 0.0, 595.0, 842.0));
     }
 
