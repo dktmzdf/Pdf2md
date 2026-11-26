@@ -12,8 +12,9 @@ use std::path::{Path, PathBuf};
 
 /// OCR 평균 신뢰도가 이 값보다 낮은 페이지는 보고에 `(low)`로 표시한다(add-pdf2md-skill design D6).
 pub const LOW_CONFIDENCE: f32 = 0.90;
-/// 모델 디렉터리에 있어야 하는 파일(add-pdf2md-skill design D8).
-pub const MODEL_FILES: [&str; 3] = ["det.onnx", "rec.onnx", "dict.txt"];
+/// 모델 디렉터리에 있어야 하는 파일(add-pdf2md-skill design D8, add-release-and-plugin design D4).
+/// 사전은 공식 recognition 저장소의 `inference.yml` 안 `character_dict` 목록에서 읽는다.
+pub const MODEL_FILES: [&str; 3] = ["det.onnx", "rec.onnx", "inference.yml"];
 /// OCR할 이미지 영역을 잘라낼 때 쓰는 렌더링 해상도(fix-review-findings design D1).
 const RENDER_DPI: u32 = 200;
 /// 합친 이미지 영역이 페이지 면적의 이 비율보다 작으면(로고, 아이콘) OCR하지 않는다.
@@ -54,7 +55,7 @@ impl fmt::Display for Error {
             Error::Usage(m) | Error::Unreadable(m) | Error::Ocr(m) | Error::Write(m) => f.write_str(m),
             Error::MissingModels { dir, missing } => write!(
                 f,
-                "OCR models missing in {}: {}. Place det.onnx, rec.onnx and dict.txt there \
+                "OCR models missing in {}: {}. Place det.onnx, rec.onnx and inference.yml there \
                  (see README), or set PDF2MD_MODEL_DIR / --models.",
                 dir.display(),
                 missing.join(", ")
@@ -273,9 +274,56 @@ fn load_engine(dir: &Path) -> Result<OcrEngine, Error> {
     if !missing.is_empty() {
         return Err(Error::MissingModels { dir: dir.to_path_buf(), missing });
     }
+    let load_err = |e: &dyn fmt::Display| Error::Ocr(format!("cannot load OCR models from {}: {e}", dir.display()));
+    let read = |f: &str| std::fs::read(dir.join(f)).map_err(|e| load_err(&e));
+    let yml = String::from_utf8(read("inference.yml")?).map_err(|e| load_err(&e))?;
+    let dict = dict_from_inference_yml(&yml).ok_or_else(|| load_err(&"no character_dict list in inference.yml"))?;
     // 기본 설정이 고른 모델에 맞다: detection은 긴 변 960, recognition 입력 높이 48(add-pdf2md-skill design D8).
-    OcrEngine::new(dir.join("det.onnx"), dir.join("rec.onnx"), dir.join("dict.txt"), OcrConfig::default())
-        .map_err(|e| Error::Ocr(format!("cannot load OCR models from {}: {e}", dir.display())))
+    OcrEngine::from_bytes(&read("det.onnx")?, &read("rec.onnx")?, &dict, OcrConfig::default()).map_err(|e| load_err(&e))
+}
+
+/// PaddleOCR `inference.yml`의 `character_dict:` 목록을 한 줄에 한 글자인 사전 문자열로 바꾼다.
+/// YAML 전체가 아니라 이 목록 하나만 읽는다(add-release-and-plugin design D4). 목록이 없으면 `None`.
+fn dict_from_inference_yml(yml: &str) -> Option<String> {
+    let chars: Vec<String> = yml
+        .lines()
+        .skip_while(|l| l.trim_end() != "  character_dict:")
+        .skip(1)
+        .map_while(|l| l.strip_prefix("  - "))
+        .map(yaml_scalar)
+        .collect();
+    (!chars.is_empty()).then(|| chars.join("\n"))
+}
+
+/// 목록 항목 하나의 값을 꺼낸다. 작은따옴표(`''`는 `'`), 큰따옴표(`\\`, `\"`, `\n`, `\t`, `\uXXXX`),
+/// 따옴표 없음을 처리한다. 공식 사전에는 작은따옴표와 따옴표 없는 항목만 있다.
+fn yaml_scalar(v: &str) -> String {
+    let v = v.trim_end();
+    let quoted = |q: char| v.len() >= 2 && v.starts_with(q) && v.ends_with(q);
+    if quoted('\'') {
+        return v[1..v.len() - 1].replace("''", "'");
+    }
+    if !quoted('"') {
+        return v.to_string();
+    }
+    let (mut out, mut it) = (String::new(), v[1..v.len() - 1].chars());
+    while let Some(c) = it.next() {
+        if c != '\\' {
+            out.push(c);
+            continue;
+        }
+        match it.next() {
+            Some('n') => out.push('\n'),
+            Some('t') => out.push('\t'),
+            Some('u') => {
+                let hex: String = it.by_ref().take(4).collect();
+                out.extend(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32));
+            },
+            Some(other) => out.push(other), // `\\`와 `\"`
+            None => {},
+        }
+    }
+    out
 }
 
 /// 표준 출력용 OCR 페이지 보고문(spec: OCR 페이지 보고). 사람이 바로 읽는 텍스트다.
@@ -348,6 +396,30 @@ mod tests {
         assert_eq!(render_box(&info(Some(Rect::new(50.0, 300.0, 495.0, 400.0)))), (50.0, 300.0, 545.0, 700.0));
         // 겹치지 않으면 렌더러처럼 MediaBox를 쓴다.
         assert_eq!(render_box(&info(Some(Rect::new(700.0, 900.0, 10.0, 10.0)))), (0.0, 0.0, 595.0, 842.0));
+    }
+
+    #[test]
+    fn dict_list_is_read_with_quotes() {
+        let yml = r#"PostProcess:
+  name: CTCLabelDecode
+  character_dict:
+  - 가
+  - '!'
+  - ''''
+  - "\""
+  - "각"
+Next: 1
+"#;
+        assert_eq!(dict_from_inference_yml(yml).unwrap(), "가\n!\n'\n\"\n각");
+        assert!(dict_from_inference_yml("PostProcess:\n  name: x\n").is_none());
+    }
+
+    /// 실제 공식 사전(11945자)을 읽는다. 모델 폴더(`PDF2MD_MODEL_DIR`)가 있을 때만 확인한다.
+    #[test]
+    fn real_inference_yml_has_all_characters() {
+        let Some(dir) = std::env::var_os("PDF2MD_MODEL_DIR") else { return };
+        let yml = std::fs::read_to_string(Path::new(&dir).join("inference.yml")).unwrap();
+        assert_eq!(dict_from_inference_yml(&yml).unwrap().lines().count(), 11945);
     }
 
     #[test]

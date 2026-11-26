@@ -1,0 +1,154 @@
+# vX.Y.Z 태그를 push하면 빌드, 테스트, prerelease, 실제 설치 검증, 정식 공개를 차례로 한다.
+# (add-release-and-plugin design D5)
+name: release
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check-version:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: 태그와 네 곳의 버전이 같은지 확인
+        run: scripts/check-version.sh "${GITHUB_REF_NAME#v}"
+
+  build-test:
+    needs: check-version
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            target: x86_64-unknown-linux-gnu
+            exe: pdf2md
+            ext: tar.gz
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            exe: pdf2md.exe
+            ext: zip
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    env:
+      ARCHIVE: pdf2md-${{ matrix.target }}.${{ matrix.ext }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - name: 빌드
+        run: cargo build --release --locked
+
+      - name: 압축
+        run: |
+          mkdir -p dist/pkg
+          cp "target/release/${{ matrix.exe }}" LICENSE-MIT LICENSE-APACHE THIRD_PARTY_LICENSES dist/pkg/
+          if [ "${{ matrix.ext }}" = zip ]; then
+            pwsh -NoProfile -Command "Compress-Archive -Path dist/pkg/* -DestinationPath dist/$ARCHIVE"
+          else
+            tar -czf "dist/$ARCHIVE" -C dist/pkg .
+          fi
+          (cd dist && sha256sum "$ARCHIVE" > "$ARCHIVE.sha256" && cp "$ARCHIVE.sha256" SHA256SUMS)
+
+      # 방금 만든 압축을 로컬 서버로 내려주고, 모델은 실제 HuggingFace에서 받는다.
+      # 테스트용 모델 폴더도 이 설치 결과를 쓴다(모델 주소와 해시를 CI에 따로 두지 않기 위해).
+      - name: 실제 설치 스크립트로 설치(바이너리는 로컬, 모델은 HuggingFace)
+        run: |
+          PY=$(command -v python3 || command -v python)
+          "$PY" -m http.server 8000 --directory dist > /dev/null 2>&1 &
+          sleep 2
+          export PDF2MD_RELEASE_BASE=http://127.0.0.1:8000
+          if [ "${{ runner.os }}" = Windows ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File skills/pdf2md/scripts/install.ps1 "$RUNNER_TEMP/data"
+          else
+            sh skills/pdf2md/scripts/install.sh "$RUNNER_TEMP/data"
+          fi
+          "$RUNNER_TEMP/data/bin/${{ matrix.exe }}" --version
+
+      - name: 테스트
+        run: PDF2MD_MODEL_DIR="$RUNNER_TEMP/data/bin/models" cargo test --release --locked
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.target }}
+          path: |
+            dist/${{ env.ARCHIVE }}
+            dist/${{ env.ARCHIVE }}.sha256
+
+  release:
+    needs: build-test
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+          merge-multiple: true
+      - name: prerelease 생성
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cd artifacts
+          cat *.sha256 > SHA256SUMS
+          cat SHA256SUMS
+          gh release create "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease \
+            --title "pdf2md $GITHUB_REF_NAME" --notes "Linux x86_64, Windows x86_64 바이너리. 설치는 README의 Claude Code plugin 절을 본다." \
+            *.tar.gz *.zip SHA256SUMS
+
+  # 공개 주소에서 실제 사용자와 같은 경로로 설치해 본다. 실패하면 prerelease로 남는다.
+  verify:
+    needs: release
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-22.04
+            exe: pdf2md
+          - os: windows-latest
+            exe: pdf2md.exe
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v4
+      - name: 설치
+        run: |
+          if [ "${{ runner.os }}" = Windows ]; then
+            powershell -NoProfile -ExecutionPolicy Bypass -File skills/pdf2md/scripts/install.ps1 "$RUNNER_TEMP/data"
+          else
+            sh skills/pdf2md/scripts/install.sh "$RUNNER_TEMP/data"
+          fi
+      - name: 버전 확인
+        run: |
+          got=$("$RUNNER_TEMP/data/bin/${{ matrix.exe }}" --version)
+          [ "$got" = "pdf2md ${GITHUB_REF_NAME#v}" ] || { echo "got '$got'"; exit 1; }
+      - name: 스캔(도형 글자) fixture 변환
+        run: |
+          cp tests/fixtures/vector_text.pdf "$RUNNER_TEMP/v.pdf"
+          "$RUNNER_TEMP/data/bin/${{ matrix.exe }}" "$RUNNER_TEMP/v.pdf"
+          grep -q VECTOR "$RUNNER_TEMP/v.md"
+      - name: Windows에서 다운로드 표시(Zone.Identifier)가 없는지 확인
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Join-Path $env:RUNNER_TEMP 'data\bin\pdf2md.exe'
+          $mark = Get-Item -LiteralPath $exe -Stream Zone.Identifier -ErrorAction SilentlyContinue
+          if ($mark) { Write-Error "Zone.Identifier found on $exe"; exit 1 }
+
+  promote:
+    needs: verify
+    runs-on: ubuntu-22.04
+    steps:
+      - name: 정식 Release로 전환
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" --prerelease=false --latest

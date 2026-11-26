@@ -1,0 +1,16 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "pdf2md",
+  "description": "PDF를 로컬에서 Markdown으로 변환하는 pdf2md plugin.",
+  "owner": {
+    "name": "dktmzdf"
+  },
+  "plugins": [
+    {
+      "name": "pdf2md",
+      "description": "PDF를 로컬에서 Markdown으로 변환해 적은 토큰으로 읽는다. 스캔 페이지는 오프라인 한국어 OCR로 읽는다.",
+      "source": "./",
+      "category": "productivity"
+    }
+  ]
+}

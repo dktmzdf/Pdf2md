@@ -89,7 +89,7 @@ fn write_pdf(dir: &Path, pages: &[Page]) -> PathBuf {
 fn models() -> PathBuf {
     let d = std::env::var_os("PDF2MD_MODEL_DIR")
         .map(PathBuf::from)
-        .expect("OCR tests need PDF2MD_MODEL_DIR pointing at det.onnx/rec.onnx/dict.txt (see README)");
+        .expect("OCR tests need PDF2MD_MODEL_DIR pointing at det.onnx/rec.onnx/inference.yml (see README)");
     assert!(d.join("rec.onnx").is_file(), "no models in {}", d.display());
     d
 }
@@ -388,4 +388,11 @@ fn vector_outline_text_is_ocrd() {
     let md = std::fs::read_to_string(d.join("doc.md")).unwrap();
     assert!(md.contains("VECTOR") && md.contains("2026"), "{out}\n{md}");
     assert!(out.contains("- p.1 confidence"), "{out}");
+}
+
+#[test]
+fn prints_version_without_reading_a_pdf() {
+    let o = run(&["--version"]);
+    assert_eq!(o.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&o.stdout), format!("pdf2md {}\n", env!("CARGO_PKG_VERSION")));
 }

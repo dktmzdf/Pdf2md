@@ -2,7 +2,7 @@ use pdf2md::{Error, LOW_CONFIDENCE, convert, parse_range, report};
 use std::path::PathBuf;
 use std::process::ExitCode;
 
-const USAGE: &str = "usage: pdf2md <input.pdf> [--pages N|A-B] [--models DIR]";
+const USAGE: &str = "usage: pdf2md <input.pdf> [--pages N|A-B] [--models DIR] | --version";
 
 /// 오류 종류를 종료 코드로 바꾼다. README와 SKILL.md의 종료 코드 표와 같아야 한다.
 fn main() -> ExitCode {
@@ -37,6 +37,11 @@ fn run() -> Result<(), Error> {
             Some("--models") => models = Some(PathBuf::from(value()?)),
             Some("-h" | "--help") => {
                 println!("{USAGE}");
+                return Ok(());
+            },
+            // 설치 스크립트가 plugin 버전과 비교하는 데 쓴다. PDF는 읽지 않는다.
+            Some("--version") => {
+                println!("pdf2md {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
             },
             _ if input.is_none() && !shown.starts_with("--") => input = Some(PathBuf::from(a)),
