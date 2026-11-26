@@ -5,10 +5,13 @@ set -eu
 want=${1:?usage: check-version.sh <version>}
 cd "$(dirname "$0")/.."
 
-cargo=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -1)
-plugin=$(sed -n 's/^ *"version": "\(.*\)",*$/\1/p' .claude-plugin/plugin.json | head -1)
-sh_v=$(sed -n 's/^VERSION=\([^ ]*\).*$/\1/p' skills/pdf2md/scripts/install.sh | head -1)
-ps_v=$(sed -n "s/^\$Version = '\(.*\)'.*\$/\1/p" skills/pdf2md/scripts/install.ps1 | head -1)
+# 정규식에 `$`를 쓰지 않는다. v0.1.0 첫 CI(Ubuntu 22.04)에서 `^$Version` 패턴이 install.ps1의 버전을
+# 못 읽었다(로컬 sed 4.10은 읽음). `^$`가 빈 줄 패턴으로 해석된 것으로 추정한다. sed 종류와 상관없게
+# 줄 끝은 `.*`로 덮고, `$Version`의 `$`는 `.`로 대신한다.
+cargo=$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -1)
+plugin=$(sed -n 's/^ *"version": "\([^"]*\)".*/\1/p' .claude-plugin/plugin.json | head -1)
+sh_v=$(sed -n 's/^VERSION=\([^ ]*\).*/\1/p' skills/pdf2md/scripts/install.sh | head -1)
+ps_v=$(sed -n "s/^.Version = '\([^']*\)'.*/\1/p" skills/pdf2md/scripts/install.ps1 | head -1)
 
 bad=0
 for pair in "Cargo.toml:$cargo" "plugin.json:$plugin" "install.sh:$sh_v" "install.ps1:$ps_v"; do
