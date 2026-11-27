@@ -9,7 +9,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue' # 5.1에서 진행 표시줄이 다운로드를 크게 느리게 만든다
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-$Version = '0.1.0' # Cargo.toml, .claude-plugin/plugin.json, install.sh와 같아야 한다(release CI가 확인)
+$Version = '0.2.0' # Cargo.toml, .claude-plugin/plugin.json, install.sh와 같아야 한다(release CI가 확인)
 $Repo = 'dktmzdf/Pdf2md'
 # 테스트에서 로컬 서버로 바꿔 끼우기 위한 값. 평소에는 실제 주소를 쓴다.
 $ReleaseBase = if ($env:PDF2MD_RELEASE_BASE) { $env:PDF2MD_RELEASE_BASE } else { "https://github.com/$Repo/releases/download/v$Version" }

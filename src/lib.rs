@@ -2,8 +2,8 @@
 
 use image::{DynamicImage, RgbaImage};
 use pdf_oxide::PdfDocument;
-use pdf_oxide::document::PageInfo;
 use pdf_oxide::converters::ConversionOptions;
+use pdf_oxide::document::PageInfo;
 use pdf_oxide::extractors::images::PdfImage;
 use pdf_oxide::ocr::{OcrConfig, OcrEngine, PageType, detect_page_type};
 use pdf_oxide::rendering::{RenderOptions, render_page};
@@ -42,7 +42,10 @@ pub enum Error {
     /// 입력 PDF를 열거나 읽을 수 없다(손상, 열람 암호).
     Unreadable(String),
     /// OCR이 필요한데 모델 파일이 없다.
-    MissingModels { dir: PathBuf, missing: Vec<&'static str> },
+    MissingModels {
+        dir: PathBuf,
+        missing: Vec<&'static str>,
+    },
     /// OCR 모델 로드나 실행에 실패했다.
     Ocr(String),
     /// 변환은 했지만 출력 `.md` 파일을 쓸 수 없다.
@@ -52,7 +55,9 @@ pub enum Error {
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Error::Usage(m) | Error::Unreadable(m) | Error::Ocr(m) | Error::Write(m) => f.write_str(m),
+            Error::Usage(m) | Error::Unreadable(m) | Error::Ocr(m) | Error::Write(m) => {
+                f.write_str(m)
+            }
             Error::MissingModels { dir, missing } => write!(
                 f,
                 "OCR models missing in {}: {}. Place det.onnx, rec.onnx and inference.yml there \
@@ -68,7 +73,10 @@ impl fmt::Display for Error {
 pub fn parse_range(s: &str) -> Result<(usize, usize), Error> {
     let bad = || Error::Usage(format!("invalid page range '{s}' (expected N or A-B)"));
     let (a, b) = s.split_once('-').unwrap_or((s, s));
-    let (a, b): (usize, usize) = (a.trim().parse().map_err(|_| bad())?, b.trim().parse().map_err(|_| bad())?);
+    let (a, b): (usize, usize) = (
+        a.trim().parse().map_err(|_| bad())?,
+        b.trim().parse().map_err(|_| bad())?,
+    );
     if a == 0 || a > b {
         return Err(bad());
     }
@@ -76,24 +84,38 @@ pub fn parse_range(s: &str) -> Result<(usize, usize), Error> {
 }
 
 /// PDF의 지정 범위(없으면 전체)를 Markdown으로 바꾼다. OCR이 필요한 페이지가 있을 때만 모델을 읽는다.
-pub fn convert(pdf: &Path, range: Option<(usize, usize)>, model_dir: &Path) -> Result<Conversion, Error> {
-    let unreadable = |e: &dyn fmt::Display| Error::Unreadable(format!("cannot read {}: {e}", pdf.display()));
+pub fn convert(
+    pdf: &Path,
+    range: Option<(usize, usize)>,
+    model_dir: &Path,
+) -> Result<Conversion, Error> {
+    let unreadable =
+        |e: &dyn fmt::Display| Error::Unreadable(format!("cannot read {}: {e}", pdf.display()));
     let doc = PdfDocument::open(pdf).map_err(|e| unreadable(&e))?;
     // 사용자 암호가 빈 문자열인 암호화 PDF는 읽을 수 있다. 실제 열람 암호가 있을 때만 거부한다.
     if doc.is_encrypted() && !doc.authenticate(b"").unwrap_or(false) {
-        return Err(Error::Unreadable(format!("{} is password protected", pdf.display())));
+        return Err(Error::Unreadable(format!(
+            "{} is password protected",
+            pdf.display()
+        )));
     }
     let count = doc.page_count().map_err(|e| unreadable(&e))?;
     let (first, last) = range.unwrap_or((1, count));
     if last > count {
-        return Err(Error::Usage(format!("page range {first}-{last} exceeds page count {count}")));
+        return Err(Error::Usage(format!(
+            "page range {first}-{last} exceeds page count {count}"
+        )));
     }
 
     let pages: Vec<(usize, PageType)> = (first - 1..last)
         .map(|p| Ok((p, detect_page_type(&doc, p).map_err(|e| unreadable(&e))?)))
         .collect::<Result<_, Error>>()?;
     let needs_ocr = pages.iter().any(|(_, t)| *t != PageType::NativeText);
-    let engine = if needs_ocr { Some(load_engine(model_dir)?) } else { None };
+    let engine = if needs_ocr {
+        Some(load_engine(model_dir)?)
+    } else {
+        None
+    };
 
     let opts = ConversionOptions::default();
     let mut markdown = String::new();
@@ -101,15 +123,30 @@ pub fn convert(pdf: &Path, range: Option<(usize, usize)>, model_dir: &Path) -> R
     for (p, kind) in pages {
         markdown.push_str(&format!("<!-- p.{} -->\n\n", p + 1));
         // 머리글, 쪽 번호, 본문 같은 디지털 글자는 항상 text layer에서 가져온다. OCR하지 않는다.
-        let mut body = doc.to_markdown(p, &opts).map_err(|e| unreadable(&e))?.trim_end().to_string();
+        // to_markdown 대신 서식 없는 평문을 쓴다. to_markdown은 Type 3 글꼴에서 문장을 조각내고
+        // 상자 레이아웃을 가짜 표로 만든다(simplify-text-extraction design D1).
+        let mut body = doc
+            .to_plain_text(p, &opts)
+            .map_err(|e| unreadable(&e))?
+            .trim_end()
+            .to_string();
         let images = doc.extract_images(p).unwrap_or_default();
         let mut figures = images.len();
         if let (Some(engine), PageType::ScannedPage | PageType::HybridPage) = (&engine, &kind) {
             eprintln!("OCR p.{}", p + 1);
             if let Some(o) = ocr_images(&doc, p, &images, engine, body.trim().is_empty())? {
-                ocr_pages.push(OcrPage { page: p + 1, confidence: o.confidence, partial: o.partial });
+                ocr_pages.push(OcrPage {
+                    page: p + 1,
+                    confidence: o.confidence,
+                    partial: o.partial,
+                });
                 if !o.text.is_empty() {
-                    body = [body, o.text].iter().filter(|s| !s.is_empty()).cloned().collect::<Vec<_>>().join("\n\n");
+                    body = [body, o.text]
+                        .iter()
+                        .filter(|s| !s.is_empty())
+                        .cloned()
+                        .collect::<Vec<_>>()
+                        .join("\n\n");
                 }
                 // 스캔 페이지에서 OCR한 이미지는 스캔 자체라 그림이 아니다. placeholder에서 뺀다(fix-review-findings design D4).
                 if kind == PageType::ScannedPage {
@@ -123,7 +160,10 @@ pub fn convert(pdf: &Path, range: Option<(usize, usize)>, model_dir: &Path) -> R
             markdown.push_str(&format!("[image p.{}]\n\n", p + 1));
         }
     }
-    Ok(Conversion { markdown, ocr_pages })
+    Ok(Conversion {
+        markdown,
+        ocr_pages,
+    })
 }
 
 struct PageOcr {
@@ -149,11 +189,21 @@ fn ocr_images(
 ) -> Result<Option<PageOcr>, Error> {
     let ocr_err = |e: &dyn fmt::Display| Error::Ocr(format!("OCR failed on page {}: {e}", p + 1));
     let largest = |images: &[PdfImage]| -> Result<Option<PageOcr>, Error> {
-        let Some(img) = images.iter().max_by_key(|i| i.width() as u64 * i.height() as u64) else {
+        let Some(img) = images
+            .iter()
+            .max_by_key(|i| i.width() as u64 * i.height() as u64)
+        else {
             return Ok(None);
         };
-        let out = engine.ocr_image(&img.to_dynamic_image().map_err(|e| ocr_err(&e))?).map_err(|e| ocr_err(&e))?;
-        Ok(Some(PageOcr { text: out.text_in_reading_order(), confidence: out.total_confidence, partial: true, images: 1 }))
+        let out = engine
+            .ocr_image(&img.to_dynamic_image().map_err(|e| ocr_err(&e))?)
+            .map_err(|e| ocr_err(&e))?;
+        Ok(Some(PageOcr {
+            text: out.text_in_reading_order(),
+            confidence: out.total_confidence,
+            partial: true,
+            images: 1,
+        }))
     };
     if images.iter().any(|i| i.bbox().is_none()) {
         return largest(images); // 위치(bbox)를 모르는 이미지가 있으면 영역을 잘라낼 수 없다
@@ -180,7 +230,11 @@ fn ocr_images(
         .ok()
         .and_then(|r| RgbaImage::from_raw(r.width, r.height, r.data));
     let Some(page) = rendered else {
-        return if kept.is_empty() { Ok(None) } else { largest(images) };
+        return if kept.is_empty() {
+            Ok(None)
+        } else {
+            largest(images)
+        };
     };
 
     let dims = page.dimensions();
@@ -189,7 +243,12 @@ fn ocr_images(
         vec![((0.0, 0.0, dims.0 as f32, dims.1 as f32), 0)]
     } else {
         kept.iter()
-            .map(|(r, n)| (to_raster((r.0, r.1, r.2 - r.0, r.3 - r.1), bx, info.rotation, dims), *n))
+            .map(|(r, n)| {
+                (
+                    to_raster((r.0, r.1, r.2 - r.0, r.3 - r.1), bx, info.rotation, dims),
+                    *n,
+                )
+            })
             .collect()
     };
     crops.sort_by(|a, b| a.0.1.total_cmp(&b.0.1));
@@ -199,13 +258,18 @@ fn ocr_images(
         if x >= page.width() || y >= page.height() {
             continue;
         }
-        let (w, h) = (((r.2 - r.0) as u32).min(page.width() - x), ((r.3 - r.1) as u32).min(page.height() - y));
+        let (w, h) = (
+            ((r.2 - r.0) as u32).min(page.width() - x),
+            ((r.3 - r.1) as u32).min(page.height() - y),
+        );
         if w == 0 || h == 0 {
             continue;
         }
         used += n;
         let crop = image::imageops::crop_imm(&page, x, y, w, h).to_image();
-        let out = engine.ocr_image(&DynamicImage::ImageRgba8(crop)).map_err(|e| ocr_err(&e))?;
+        let out = engine
+            .ocr_image(&DynamicImage::ImageRgba8(crop))
+            .map_err(|e| ocr_err(&e))?;
         weighted += out.total_confidence * out.spans.len() as f32;
         spans += out.spans.len();
         let t = out.text_in_reading_order();
@@ -213,8 +277,17 @@ fn ocr_images(
             texts.push(t);
         }
     }
-    let confidence = if spans == 0 { 0.0 } else { weighted / spans as f32 };
-    Ok(Some(PageOcr { text: texts.join("\n\n"), confidence, partial: false, images: used }))
+    let confidence = if spans == 0 {
+        0.0
+    } else {
+        weighted / spans as f32
+    };
+    Ok(Some(PageOcr {
+        text: texts.join("\n\n"),
+        confidence,
+        partial: false,
+        images: used,
+    }))
 }
 
 /// 렌더러가 그리는 페이지 영역: MediaBox ∩ CropBox, 둘이 겹치지 않으면 MediaBox.
@@ -223,8 +296,15 @@ fn ocr_images(
 fn render_box(info: &PageInfo) -> Px {
     let m = &info.media_box;
     let media = (m.x, m.y, m.x + m.width, m.y + m.height);
-    let Some(c) = &info.crop_box else { return media };
-    let b = (c.x.max(media.0), c.y.max(media.1), (c.x + c.width).min(media.2), (c.y + c.height).min(media.3));
+    let Some(c) = &info.crop_box else {
+        return media;
+    };
+    let b = (
+        c.x.max(media.0),
+        c.y.max(media.1),
+        (c.x + c.width).min(media.2),
+        (c.y + c.height).min(media.3),
+    );
     if b.2 <= b.0 || b.3 <= b.1 { media } else { b }
 }
 
@@ -233,7 +313,11 @@ fn render_box(info: &PageInfo) -> Px {
 /// 여기서도 똑같이 돌린다. 렌더러가 메모리 한도 때문에 DPI를 낮출 수 있어서, 배율은 렌더링 결과 크기에서 계산한다.
 fn to_raster(r: (f32, f32, f32, f32), page: Px, rot: i32, raster: (u32, u32)) -> Px {
     let rot = rot.rem_euclid(360);
-    let (w0, h0) = if rot % 180 == 0 { raster } else { (raster.1, raster.0) };
+    let (w0, h0) = if rot % 180 == 0 {
+        raster
+    } else {
+        (raster.1, raster.0)
+    };
     let (w0, h0) = (w0 as f32, h0 as f32);
     let s = w0 / (page.2 - page.0);
     let map = |x: f32, y: f32| {
@@ -255,10 +339,9 @@ fn merge_regions(regions: Vec<(Px, usize)>) -> Vec<(Px, usize)> {
     const SLACK: f32 = 1.0;
     let mut merged: Vec<(Px, usize)> = Vec::new();
     for (mut q, mut n) in regions {
-        while let Some(i) = merged
-            .iter()
-            .position(|(m, _)| q.0 <= m.2 + SLACK && m.0 <= q.2 + SLACK && q.1 <= m.3 + SLACK && m.1 <= q.3 + SLACK)
-        {
+        while let Some(i) = merged.iter().position(|(m, _)| {
+            q.0 <= m.2 + SLACK && m.0 <= q.2 + SLACK && q.1 <= m.3 + SLACK && m.1 <= q.3 + SLACK
+        }) {
             let (m, k) = merged.remove(i);
             q = (q.0.min(m.0), q.1.min(m.1), q.2.max(m.2), q.3.max(m.3));
             n += k;
@@ -270,16 +353,34 @@ fn merge_regions(regions: Vec<(Px, usize)>) -> Vec<(Px, usize)> {
 
 /// 모델 디렉터리에서 OCR 엔진을 만든다. 파일이 없으면 다운로드하지 않고 `MissingModels`로 실패한다.
 fn load_engine(dir: &Path) -> Result<OcrEngine, Error> {
-    let missing: Vec<_> = MODEL_FILES.into_iter().filter(|f| !dir.join(f).is_file()).collect();
+    let missing: Vec<_> = MODEL_FILES
+        .into_iter()
+        .filter(|f| !dir.join(f).is_file())
+        .collect();
     if !missing.is_empty() {
-        return Err(Error::MissingModels { dir: dir.to_path_buf(), missing });
+        return Err(Error::MissingModels {
+            dir: dir.to_path_buf(),
+            missing,
+        });
     }
-    let load_err = |e: &dyn fmt::Display| Error::Ocr(format!("cannot load OCR models from {}: {e}", dir.display()));
+    let load_err = |e: &dyn fmt::Display| {
+        Error::Ocr(format!(
+            "cannot load OCR models from {}: {e}",
+            dir.display()
+        ))
+    };
     let read = |f: &str| std::fs::read(dir.join(f)).map_err(|e| load_err(&e));
     let yml = String::from_utf8(read("inference.yml")?).map_err(|e| load_err(&e))?;
-    let dict = dict_from_inference_yml(&yml).ok_or_else(|| load_err(&"no character_dict list in inference.yml"))?;
+    let dict = dict_from_inference_yml(&yml)
+        .ok_or_else(|| load_err(&"no character_dict list in inference.yml"))?;
     // 기본 설정이 고른 모델에 맞다: detection은 긴 변 960, recognition 입력 높이 48(add-pdf2md-skill design D8).
-    OcrEngine::from_bytes(&read("det.onnx")?, &read("rec.onnx")?, &dict, OcrConfig::default()).map_err(|e| load_err(&e))
+    OcrEngine::from_bytes(
+        &read("det.onnx")?,
+        &read("rec.onnx")?,
+        &dict,
+        OcrConfig::default(),
+    )
+    .map_err(|e| load_err(&e))
 }
 
 /// PaddleOCR `inference.yml`의 `character_dict:` 목록을 한 줄에 한 글자인 사전 문자열로 바꾼다.
@@ -318,9 +419,9 @@ fn yaml_scalar(v: &str) -> String {
             Some('u') => {
                 let hex: String = it.by_ref().take(4).collect();
                 out.extend(u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32));
-            },
+            }
             Some(other) => out.push(other), // `\\`와 `\"`
-            None => {},
+            None => {}
         }
     }
     out
@@ -331,11 +432,21 @@ pub fn report(ocr_pages: &[OcrPage], low: f32) -> String {
     if ocr_pages.is_empty() {
         return "OCR pages: none\n".to_string();
     }
-    let mut s = format!("OCR pages: {} (text was recognized from images and may contain errors)\n", ocr_pages.len());
+    let mut s = format!(
+        "OCR pages: {} (text was recognized from images and may contain errors)\n",
+        ocr_pages.len()
+    );
     for o in ocr_pages {
         let low_flag = if o.confidence < low { " (low)" } else { "" };
-        let partial_flag = if o.partial { " (partial: only part of the page could be read)" } else { "" };
-        s.push_str(&format!("- p.{} confidence {:.2}{low_flag}{partial_flag}\n", o.page, o.confidence));
+        let partial_flag = if o.partial {
+            " (partial: only part of the page could be read)"
+        } else {
+            ""
+        };
+        s.push_str(&format!(
+            "- p.{} confidence {:.2}{low_flag}{partial_flag}\n",
+            o.page, o.confidence
+        ));
     }
     s
 }
@@ -356,14 +467,28 @@ mod tests {
     #[test]
     fn report_flags_low_and_partial() {
         let pages = [
-            OcrPage { page: 2, confidence: 0.97, partial: false },
-            OcrPage { page: 4, confidence: 0.85, partial: false },
-            OcrPage { page: 5, confidence: 0.95, partial: true },
+            OcrPage {
+                page: 2,
+                confidence: 0.97,
+                partial: false,
+            },
+            OcrPage {
+                page: 4,
+                confidence: 0.85,
+                partial: false,
+            },
+            OcrPage {
+                page: 5,
+                confidence: 0.95,
+                partial: true,
+            },
         ];
         let r = report(&pages, LOW_CONFIDENCE);
         assert!(r.contains("- p.2 confidence 0.97\n"));
         assert!(r.contains("- p.4 confidence 0.85 (low)\n"));
-        assert!(r.contains("- p.5 confidence 0.95 (partial: only part of the page could be read)\n"));
+        assert!(
+            r.contains("- p.5 confidence 0.95 (partial: only part of the page could be read)\n")
+        );
         assert_eq!(report(&[], LOW_CONFIDENCE), "OCR pages: none\n");
     }
 
@@ -372,30 +497,63 @@ mod tests {
         // 100x200pt 페이지를 2 px/pt로 렌더링. 왼쪽 아래 모서리의 10x20pt 사각형.
         let media = (0.0, 0.0, 100.0, 200.0);
         let rect = (0.0, 0.0, 10.0, 20.0);
-        assert_eq!(to_raster(rect, media, 0, (200, 400)), (0.0, 360.0, 20.0, 400.0));
+        assert_eq!(
+            to_raster(rect, media, 0, (200, 400)),
+            (0.0, 360.0, 20.0, 400.0)
+        );
         // 시계 방향 90도: 페이지의 왼쪽 아래가 렌더링 결과의 왼쪽 위로 간다.
-        assert_eq!(to_raster(rect, media, 90, (400, 200)), (0.0, 0.0, 40.0, 20.0));
-        assert_eq!(to_raster(rect, media, 180, (200, 400)), (180.0, 0.0, 200.0, 40.0));
-        assert_eq!(to_raster(rect, media, 270, (400, 200)), (360.0, 180.0, 400.0, 200.0));
-        assert_eq!(to_raster(rect, media, -90, (400, 200)), to_raster(rect, media, 270, (400, 200)));
+        assert_eq!(
+            to_raster(rect, media, 90, (400, 200)),
+            (0.0, 0.0, 40.0, 20.0)
+        );
+        assert_eq!(
+            to_raster(rect, media, 180, (200, 400)),
+            (180.0, 0.0, 200.0, 40.0)
+        );
+        assert_eq!(
+            to_raster(rect, media, 270, (400, 200)),
+            (360.0, 180.0, 400.0, 200.0)
+        );
+        assert_eq!(
+            to_raster(rect, media, -90, (400, 200)),
+            to_raster(rect, media, 270, (400, 200))
+        );
     }
 
     #[test]
     fn raster_mapping_uses_the_rendered_box_origin() {
         // CropBox (50,300)-(545,700)을 1 px/pt로 렌더링. (60,500)의 100x50 사각형은
         // 렌더링 결과 왼쪽 위에서 x = 60-50 = 10, y = 700-550 = 150에 있다.
-        assert_eq!(to_raster((60.0, 500.0, 100.0, 50.0), (50.0, 300.0, 545.0, 700.0), 0, (495, 400)), (10.0, 150.0, 110.0, 200.0));
+        assert_eq!(
+            to_raster(
+                (60.0, 500.0, 100.0, 50.0),
+                (50.0, 300.0, 545.0, 700.0),
+                0,
+                (495, 400)
+            ),
+            (10.0, 150.0, 110.0, 200.0)
+        );
     }
 
     #[test]
     fn render_box_is_media_and_crop_intersection() {
         use pdf_oxide::geometry::Rect;
         let media = Rect::new(0.0, 0.0, 595.0, 842.0);
-        let info = |crop| PageInfo { media_box: media, crop_box: crop, rotation: 0 };
+        let info = |crop| PageInfo {
+            media_box: media,
+            crop_box: crop,
+            rotation: 0,
+        };
         assert_eq!(render_box(&info(None)), (0.0, 0.0, 595.0, 842.0));
-        assert_eq!(render_box(&info(Some(Rect::new(50.0, 300.0, 495.0, 400.0)))), (50.0, 300.0, 545.0, 700.0));
+        assert_eq!(
+            render_box(&info(Some(Rect::new(50.0, 300.0, 495.0, 400.0)))),
+            (50.0, 300.0, 545.0, 700.0)
+        );
         // 겹치지 않으면 렌더러처럼 MediaBox를 쓴다.
-        assert_eq!(render_box(&info(Some(Rect::new(700.0, 900.0, 10.0, 10.0)))), (0.0, 0.0, 595.0, 842.0));
+        assert_eq!(
+            render_box(&info(Some(Rect::new(700.0, 900.0, 10.0, 10.0)))),
+            (0.0, 0.0, 595.0, 842.0)
+        );
     }
 
     #[test]
@@ -417,14 +575,21 @@ Next: 1
     /// 실제 공식 사전(11945자)을 읽는다. 모델 폴더(`PDF2MD_MODEL_DIR`)가 있을 때만 확인한다.
     #[test]
     fn real_inference_yml_has_all_characters() {
-        let Some(dir) = std::env::var_os("PDF2MD_MODEL_DIR") else { return };
+        let Some(dir) = std::env::var_os("PDF2MD_MODEL_DIR") else {
+            return;
+        };
         let yml = std::fs::read_to_string(Path::new(&dir).join("inference.yml")).unwrap();
-        assert_eq!(dict_from_inference_yml(&yml).unwrap().lines().count(), 11945);
+        assert_eq!(
+            dict_from_inference_yml(&yml).unwrap().lines().count(),
+            11945
+        );
     }
 
     #[test]
     fn touching_tiles_merge_and_count_images() {
-        let tiles: Vec<(Px, usize)> = (0..4).map(|i| ((i as f32 * 10.0, 0.0, (i + 1) as f32 * 10.0, 10.0), 1)).collect();
+        let tiles: Vec<(Px, usize)> = (0..4)
+            .map(|i| ((i as f32 * 10.0, 0.0, (i + 1) as f32 * 10.0, 10.0), 1))
+            .collect();
         let far = ((500.0, 500.0, 505.0, 505.0), 1);
         let merged = merge_regions(tiles.into_iter().chain([far]).collect());
         assert_eq!(merged.len(), 2);

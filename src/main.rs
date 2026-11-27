@@ -17,7 +17,7 @@ fn main() -> ExitCode {
                 Error::Ocr(_) => 5,
                 Error::Write(_) => 6,
             })
-        },
+        }
     }
 }
 
@@ -27,25 +27,34 @@ fn run() -> Result<(), Error> {
     let (mut input, mut range, mut models) = (None, None, None);
     while let Some(a) = args.next() {
         let shown = a.to_string_lossy().into_owned();
-        let mut value = || args.next().ok_or_else(|| Error::Usage(format!("{shown} needs a value\n{USAGE}")));
+        let mut value = || {
+            args.next()
+                .ok_or_else(|| Error::Usage(format!("{shown} needs a value\n{USAGE}")))
+        };
         match a.to_str() {
             Some("--pages") => {
                 let v = value()?;
-                let v = v.to_str().ok_or_else(|| Error::Usage(format!("invalid page range {v:?}")))?;
+                let v = v
+                    .to_str()
+                    .ok_or_else(|| Error::Usage(format!("invalid page range {v:?}")))?;
                 range = Some(parse_range(v)?);
-            },
+            }
             Some("--models") => models = Some(PathBuf::from(value()?)),
             Some("-h" | "--help") => {
                 println!("{USAGE}");
                 return Ok(());
-            },
+            }
             // 설치 스크립트가 plugin 버전과 비교하는 데 쓴다. PDF는 읽지 않는다.
             Some("--version") => {
                 println!("pdf2md {}", env!("CARGO_PKG_VERSION"));
                 return Ok(());
-            },
+            }
             _ if input.is_none() && !shown.starts_with("--") => input = Some(PathBuf::from(a)),
-            _ => return Err(Error::Usage(format!("unexpected argument '{shown}'\n{USAGE}"))),
+            _ => {
+                return Err(Error::Usage(format!(
+                    "unexpected argument '{shown}'\n{USAGE}"
+                )));
+            }
         }
     }
     let input = input.ok_or_else(|| Error::Usage(USAGE.to_string()))?;

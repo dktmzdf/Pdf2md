@@ -6,7 +6,7 @@
 # - 검증을 통과한 파일만 제자리로 옮기므로, 실패해도 기존 정상 파일은 그대로 남는다.
 set -eu
 
-VERSION=0.1.0 # Cargo.toml, .claude-plugin/plugin.json, install.ps1과 같아야 한다(release CI가 확인)
+VERSION=0.2.0 # Cargo.toml, .claude-plugin/plugin.json, install.ps1과 같아야 한다(release CI가 확인)
 REPO=dktmzdf/Pdf2md
 # 테스트에서 로컬 서버로 바꿔 끼우기 위한 값. 평소에는 실제 주소를 쓴다.
 RELEASE_BASE=${PDF2MD_RELEASE_BASE:-https://github.com/$REPO/releases/download/v$VERSION}
